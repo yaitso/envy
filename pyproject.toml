@@ -1,9 +1,28 @@
 [project]
-name = "hello-py"
+name = "envy"
 version = "0.1.0"
-description = "Add your description here"
+description = "Environment for LLM tasks"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.67.0",
+    "click>=8.3.1",
+    "mnist1d>=0.0.2.post1",
+    "numpy>=2.3.5",
+    "optuna>=4.6.0",
+    "pandas>=2.3.3",
+    "python-dotenv>=1.0.0",
+    "result>=0.17.0",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.3",
+    "xxhash>=3.5.0",
 ]
+
+[project.scripts]
+envy = "envy:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+py-modules = ["envy"]

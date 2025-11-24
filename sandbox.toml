@@ -1,0 +1,7 @@
+[project]
+name = "sandbox"
+version = "0.1.0"
+description = "Sandbox for LLM tasks"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["pandas", "numpy", "scipy", "scikit-learn"]

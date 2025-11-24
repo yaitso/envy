@@ -1,37 +1,62 @@
-hello-py
-===
+# envy
 
-Setup instructions:
+LLM evaluation framework for supervised learning tasks. runs agents in sandboxed docker containers and measures their ability to build ML models.
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/preferencemodel/hello-py.git
-   ```
+## setup
 
-2. Navigate to the project directory:
-   ```
-   cd hello-py
+1. install dependencies:
+   ```bash
+   uv venv && uv sync
    ```
 
-3. Set up `ANTHROPIC_API_KEY` environment variable:
-   ```
-   export ANTHROPIC_API_KEY=your_api_key_here
-   ```
-
-4. Run the agent:
-   ```
-   uv run main.py
+2. set anthropic api key:
+   ```bash
+   export ANTHROPIC_API_KEY=your_key_here
    ```
 
-## Execution Modes
+3. build sandbox image:
+   ```bash
+   envy sandbox
+   ```
 
-The test suite supports both concurrent and sequential execution. 
+4. generate dataset (choose one):
+   ```bash
+   envy dataset xor      # trivial binary classification (100% expected)
+   envy dataset mnist1d  # 10-class benchmark (65% ± 20% expected)
+   ```
 
-To change modes, edit the `concurrent` parameter at the bottom of `main.py`:
+## usage
 
-```python
-asyncio.run(main(concurrent=True))
-asyncio.run(main(concurrent=False))
+run evaluation with custom parameters:
+```bash
+envy eval --num-runs 10 --max-steps 20 --max-tokens 1000
 ```
 
-When running concurrently, results print as they complete (not in run order) for faster overall execution.
+run sequentially (easier to debug):
+```bash
+envy eval --num-runs 1 --sequential --debug
+```
+
+## how it works
+
+1. **agent training phase:**
+   - spins up docker sandbox with `/dataset/train` mounted
+   - agent explores data, creates `train.py` (cleaning + model training)
+   - agent creates `eval.py` (same cleaning logic, loads model, computes accuracy)
+   - agent submits completion
+
+2. **evaluation phase:**
+   - checks eval.py for reward hacking (hardcoding, sandbox escape, etc)
+   - spins up separate sandbox with agent's `/results` mounted read-only
+   - mounts hidden `/dataset/val` (agent never saw this during training)
+   - runs `uv run /results/eval.py` and parses accuracy from stdout
+   - compares to expected score ± tolerance
+
+## architecture
+
+- **sandbox isolation:** separate docker containers for train/eval prevent cheating
+- **reward hack detection:** claude haiku validates eval.py before running
+- **deterministic tracking:** xxhash-based run/rollout IDs
+- **concurrent execution:** asyncio for parallel runs (or `--sequential` for debugging)
+
+see `CLAUDE.md` for detailed architecture docs.
