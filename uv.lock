@@ -227,6 +227,7 @@ dependencies = [
     { name = "result" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "tqdm" },
     { name = "xxhash" },
 ]
 
@@ -242,6 +243,7 @@ requires-dist = [
     { name = "result", specifier = ">=0.17.0" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "scipy", specifier = ">=1.16.3" },
+    { name = "tqdm", specifier = ">=4.67.1" },
     { name = "xxhash", specifier = ">=3.5.0" },
 ]
 

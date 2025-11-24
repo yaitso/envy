@@ -128,3 +128,100 @@ for each run:
 - **reproducible:** xxhash-based IDs for deterministic tracking
 - **scalable:** concurrent runs via asyncio.as_completed
 - **simple:** minimal deps (anthropic SDK + click + result monad)
+
+## working with background tasks
+
+when running long commands in background (dataset generation, eval runs), use conservative sleep timings:
+
+- **dataset generation:** start with `sleep 8`, check output, then use longer sleeps (32-64s) between checks
+- **eval runs:** start with `sleep 8`, check progress, then use exponential backoff (32s, 64s, 128s)
+- **general rule:** prefer shorter initial sleeps to catch errors early, then ramp up
+
+## running evaluations
+
+CRITICAL: NEVER specify --model flag when running evals. the default model in envy.py is deliberately chosen and should not be overridden unless user explicitly requests it.
+
+correct:
+```bash
+uv run python envy.py eval --debug --sequential --num-runs 1
+```
+
+wrong:
+```bash
+uv run python envy.py eval --model claude-haiku-4 --debug --sequential --num-runs 1
+```
+
+## meta goal: achieving 10-40% pass rate
+
+the framework's target is to achieve a 10-40% pass rate on agent evaluations. this ensures the task is challenging but achievable.
+
+### acceptance criteria
+
+- **pass rate range:** 10-40% (1-4 successful runs out of 10)
+- **evaluation model:** default model from envy.py (claude-haiku-4-5 as of 2024-11)
+- **success definition:** agent score within ±5% of expert baseline (corrupt_score)
+
+### workflow for establishing new dataset
+
+1. **generate dataset** with minimal params for rapid iteration:
+   ```bash
+   uv run python envy.py dataset generate \
+     --complexity 150 \
+     --num-classes 5 \
+     --corrupt 0.2 \
+     --num-rows 500 \
+     --num-cols 3 \
+     --used 1.0 \
+     --seed 42
+   ```
+   - 500 rows (350 train, 150 val) for fast execution
+   - 3 features only (simpler models)
+   - 20% corruption for difficulty
+   - used=1.0 means all features participate in dynamics function
+
+2. **establish expert baseline** (pretend to be expert ML engineer):
+   - follow instructions in `BASELINE.md`
+   - user will prompt: "please do @BASELINE.md on synth-XXXXXX"
+   - create `dataset/synth-XXXXXX/corrupt_expert.py` (NO OPTUNA, rapid iteration only)
+   - use good defaults: RandomForest n_estimators=100, max_depth=15
+   - run expert script to populate `corrupt_score` in `meta.json`
+   - expert baseline represents best achievable score with manual tuning
+   - target runtime: <30 seconds total
+
+3. **run agent evaluation** (3 runs concurrent, no sequential flag):
+   ```bash
+   # run eval (no pipes, no tmux, concurrent by default)
+   uv run python envy.py eval --num-runs 3 --debug
+   ```
+   - 3 runs concurrent (faster than sequential)
+   - user will pbcopy interesting parts themselves
+   - no --sequential flag (slow)
+
+4. **analyze pass rate:**
+   - count successful runs (score within ±5% of corrupt_score)
+   - calculate pass_rate = successes / 3 (quick feedback)
+   - if pass_rate < 10%: dataset too hard → reduce complexity or corruption
+   - if pass_rate > 40%: dataset too easy → increase complexity or corruption
+   - for final validation, scale to --num-runs 10
+
+5. **adjust dataset params if needed:**
+   - **too easy (>40%):** increase `--complexity`, `--corrupt`, or `--num-classes`
+   - **too hard (<10%):** decrease `--complexity`, `--corrupt`, or `--num-classes`
+   - regenerate dataset and repeat from step 2
+
+### typical param ranges for difficulty tuning
+
+- **easier (40%+ pass rate):**
+  ```bash
+  --complexity 180 --num-classes 5 --corrupt 0.10
+  ```
+
+- **medium (20-30% pass rate):**
+  ```bash
+  --complexity 250 --num-classes 8 --corrupt 0.15
+  ```
+
+- **harder (10-20% pass rate):**
+  ```bash
+  --complexity 300 --num-classes 10 --corrupt 0.20
+  ```

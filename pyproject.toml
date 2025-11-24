@@ -15,6 +15,7 @@ dependencies = [
     "result>=0.17.0",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.3",
+    "tqdm>=4.67.1",
     "xxhash>=3.5.0",
 ]
 
