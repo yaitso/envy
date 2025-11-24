@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import click
+import json
 import logging
 from subprocess import run
 from pathlib import Path
@@ -8,6 +9,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 script_dir = Path(__file__).parent
+
+
+def write_csv_dataset(
+    name: str,
+    train_data: tuple[list[str], list[list[str]]],
+    val_data: tuple[list[str], list[list[str]]],
+    meta: dict,
+):
+    train_dir = script_dir / "dataset" / "train"
+    val_dir = script_dir / "dataset" / "val"
+    dataset_dir = script_dir / "dataset"
+
+    train_dir.mkdir(parents=True, exist_ok=True)
+    val_dir.mkdir(parents=True, exist_ok=True)
+
+    train_csv = train_dir / "train.csv"
+    val_csv = val_dir / "val.csv"
+    meta_json = dataset_dir / "meta.json"
+
+    train_header, train_rows = train_data
+    val_header, val_rows = val_data
+
+    train_content = ",".join(train_header) + "\n" + "\n".join([",".join(row) for row in train_rows]) + "\n"
+    val_content = ",".join(val_header) + "\n" + "\n".join([",".join(row) for row in val_rows]) + "\n"
+
+    train_csv.write_text(train_content)
+    val_csv.write_text(val_content)
+    meta_json.write_text(json.dumps(meta, indent=2))
+
+    click.echo(f"created {train_csv}")
+    click.echo(f"created {val_csv}")
+    click.echo(f"created {meta_json}")
 
 
 @click.group()
@@ -34,107 +67,52 @@ def dataset():
 @dataset.command()
 def xor():
     """generate xor dataset"""
-    import json
-
-    train_dir = script_dir / "dataset" / "train"
-    val_dir = script_dir / "dataset" / "val"
-    dataset_dir = script_dir / "dataset"
-
-    train_dir.mkdir(parents=True, exist_ok=True)
-    val_dir.mkdir(parents=True, exist_ok=True)
-
-    train_csv = train_dir / "train.csv"
-    val_csv = val_dir / "val.csv"
-    meta_json = dataset_dir / "meta.json"
-
-    train_csv.write_text("""x1,x2,y
-0,0,0
-0,1,1
-1,0,1
-""")
-
-    val_csv.write_text("""x1,x2,y
-1,1,0
-""")
-
-    meta_json.write_text(
-        json.dumps(
-            {
-                "name": "xor",
-                "task": "binary classification",
-                "expected_score": 1.0,
-                "score_tolerance": 0.1,
-                "description": "trivial xor problem — should achieve 100% accuracy",
-            },
-            indent=2,
-        )
+    train_data = (
+        ["x1", "x2", "y"],
+        [["0", "0", "0"], ["0", "1", "1"], ["1", "0", "1"]],
     )
-
-    click.echo(f"created {train_csv}")
-    click.echo(f"created {val_csv}")
-    click.echo(f"created {meta_json}")
+    val_data = (["x1", "x2", "y"], [["1", "1", "0"]])
+    meta = {
+        "name": "xor",
+        "task": "binary classification",
+        "expected_score": 1.0,
+        "score_tolerance": 0.1,
+        "description": "trivial xor problem — should achieve 100% accuracy",
+    }
+    write_csv_dataset("xor", train_data, val_data, meta)
 
 
 @dataset.command()
 def mnist1d():
     """generate mnist1d dataset"""
-    import json
     from mnist1d.data import make_dataset, get_dataset_args
-
-    train_dir = script_dir / "dataset" / "train"
-    val_dir = script_dir / "dataset" / "val"
-    dataset_dir = script_dir / "dataset"
-
-    train_dir.mkdir(parents=True, exist_ok=True)
-    val_dir.mkdir(parents=True, exist_ok=True)
 
     click.echo("generating mnist1d dataset...")
     defaults = get_dataset_args()
     data = make_dataset(defaults)
-
-    train_csv = train_dir / "train.csv"
-    val_csv = val_dir / "val.csv"
-    meta_json = dataset_dir / "meta.json"
 
     x_train, y_train = data["x"], data["y"]
     x_test, y_test = data["x_test"], data["y_test"]
 
     feature_cols = [f"x{i}" for i in range(x_train.shape[1])]
 
-    train_header = ",".join(feature_cols + ["y"])
-    train_rows = []
-    for i in range(len(x_train)):
-        row = ",".join([str(val) for val in x_train[i]] + [str(int(y_train[i]))])
-        train_rows.append(row)
-    train_content = train_header + "\n" + "\n".join(train_rows) + "\n"
-    train_csv.write_text(train_content)
+    train_rows = [[str(val) for val in x_train[i]] + [str(int(y_train[i]))] for i in range(len(x_train))]
+    val_rows = [[str(val) for val in x_test[i]] + [str(int(y_test[i]))] for i in range(len(x_test))]
 
-    val_header = ",".join(feature_cols + ["y"])
-    val_rows = []
-    for i in range(len(x_test)):
-        row = ",".join([str(val) for val in x_test[i]] + [str(int(y_test[i]))])
-        val_rows.append(row)
-    val_content = val_header + "\n" + "\n".join(val_rows) + "\n"
-    val_csv.write_text(val_content)
+    train_data = (feature_cols + ["y"], train_rows)
+    val_data = (feature_cols + ["y"], val_rows)
+    meta = {
+        "name": "mnist1d",
+        "task": "10-class classification",
+        "expected_score": 0.65,
+        "score_tolerance": 0.2,
+        "description": "mnist1d benchmark — logistic: 32%, mlp: 68%, cnn: 94%",
+    }
 
-    meta_json.write_text(
-        json.dumps(
-            {
-                "name": "mnist1d",
-                "task": "10-class classification",
-                "expected_score": 0.65,
-                "score_tolerance": 0.2,
-                "description": "mnist1d benchmark — logistic: 32%, mlp: 68%, cnn: 94%",
-            },
-            indent=2,
-        )
-    )
+    write_csv_dataset("mnist1d", train_data, val_data, meta)
 
-    click.echo(
-        f"created {train_csv} ({len(x_train)} samples, {x_train.shape[1]} features)"
-    )
-    click.echo(f"created {val_csv} ({len(x_test)} samples, {x_test.shape[1]} features)")
-    click.echo(f"created {meta_json}")
+    click.echo(f"({len(x_train)} samples, {x_train.shape[1]} features in train)")
+    click.echo(f"({len(x_test)} samples, {x_test.shape[1]} features in val)")
 
 
 @cli.command()

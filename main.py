@@ -16,6 +16,63 @@ claude = "\033[38;2;215;119;87m"
 reset = "\033[0m"
 
 
+def get_repo_root() -> Path:
+    return Path(__file__).parent
+
+
+def get_sandbox_name(run_id: str, rollout_id: str) -> str:
+    return f"envy-{run_id}-{rollout_id}"
+
+
+def get_results_dir(run_id: str, rollout_id: str) -> Path:
+    return get_repo_root() / "results" / run_id / rollout_id
+
+
+def get_dataset_dir(split: str) -> Path:
+    return get_repo_root() / "dataset" / split
+
+
+def run_docker_cmd(cmd: str) -> Result[str, str]:
+    process = run(cmd, shell=True, capture_output=True)
+    if process.returncode != 0:
+        return Err(process.stderr.decode("utf-8").strip())
+    return Ok(process.stdout.decode("utf-8").strip())
+
+
+def start_docker_container(
+    name: str, results_dir: Path, dataset_dir: Path, readonly_results: bool = False
+) -> Result[None, str]:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    ro_flag = ":ro" if readonly_results else ""
+    cmd = (
+        f"docker run -d --name {name} "
+        f"-v {results_dir}:/results{ro_flag} "
+        f"-v {dataset_dir}:/dataset "
+        f"envy"
+    )
+    return run_docker_cmd(cmd).map(lambda _: None)
+
+
+def exec_in_docker(name: str, cmd: str, timeout: int = 60) -> Result[str, str]:
+    escaped_cmd = cmd.replace('"', '\\"')
+    try:
+        process = run(
+            f'docker exec -i {name} bash -c "{escaped_cmd}"',
+            shell=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if process.returncode != 0:
+            return Err(process.stderr.decode("utf-8").strip())
+        return Ok(process.stdout.decode("utf-8").strip())
+    except TimeoutExpired:
+        return Err(f"command timed out after {timeout}s")
+
+
+def remove_docker_container(name: str) -> Result[None, str]:
+    return run_docker_cmd(f"docker rm -f {name}").map(lambda _: None)
+
+
 class RunBashCmdResult(TypedDict):
     output: str
 
@@ -31,70 +88,86 @@ class EvalModelResult(TypedDict):
 def start_sandbox(run_id: str, rollout_id: str) -> Result[None, str]:
     logger.info(f"starting sandbox (run: {run_id}, rollout: {rollout_id})")
 
-    repo_root = Path(__file__).parent
-    dataset_train_dir = repo_root / "dataset" / "train"
-    results_dir = repo_root / "results" / run_id / rollout_id
-    results_dir.mkdir(parents=True, exist_ok=True)
+    name = get_sandbox_name(run_id, rollout_id)
+    results_dir = get_results_dir(run_id, rollout_id)
+    dataset_dir = get_dataset_dir("train")
 
-    logger.debug(f"dataset mount: {dataset_train_dir} -> /dataset")
+    logger.debug(f"dataset mount: {dataset_dir} -> /dataset")
     logger.debug(f"results mount: {results_dir} -> /results")
 
-    process = run(
-        f"docker run -d --name envy-{run_id}-{rollout_id} "
-        f"-v {dataset_train_dir}:/dataset "
-        f"-v {results_dir}:/results "
-        f"envy",
-        shell=True,
-        capture_output=True,
-    )
-
-    if process.returncode != 0:
-        logger.error(f"failed to start sandbox: {process.stderr.decode('utf-8')}")
-        return Err(process.stderr.decode("utf-8").strip())
-
-    logger.info("sandbox started successfully")
-    return Ok(None)
+    match start_docker_container(name, results_dir, dataset_dir):
+        case Ok(_):
+            logger.info("sandbox started successfully")
+            return Ok(None)
+        case Err(error):
+            logger.error(f"failed to start sandbox: {error}")
+            return Err(error)
 
 
 def kill_sandbox(run_id: str, rollout_id: str) -> Result[None, str]:
-    process = run(
-        f"docker rm -f envy-{run_id}-{rollout_id}",
-        shell=True,
-        capture_output=True,
-    )
-    if process.returncode != 0:
-        return Err(process.stderr.decode("utf-8").strip())
-    return Ok(None)
+    return remove_docker_container(get_sandbox_name(run_id, rollout_id))
 
 
 def run_bash_cmd(
     run_id: str, rollout_id: str, input: str, timeout: int = 60
 ) -> Result[RunBashCmdResult, str]:
-    escaped_cmd = input.replace('"', '\\"')
+    name = get_sandbox_name(run_id, rollout_id)
 
-    try:
-        process = run(
-            f'docker exec -i envy-{run_id}-{rollout_id} bash -c "{escaped_cmd}"',
-            shell=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+    logger.debug(f"bash cmd: {input}")
 
-        logger.debug(f"bash cmd: {input}")
-        logger.debug(f"exit code: {process.returncode}")
-        logger.debug(f"stdout: {process.stdout.decode('utf-8')[:500]}")
-        logger.debug(f"stderr: {process.stderr.decode('utf-8')[:500]}")
-
-        if process.returncode != 0:
-            return Err(process.stderr.decode("utf-8").strip())
-        return Ok({"output": process.stdout.decode("utf-8").strip()})
-
-    except TimeoutExpired:
-        return Err(f"command timed out after {timeout}s")
+    match exec_in_docker(name, input, timeout):
+        case Ok(output):
+            logger.debug(f"stdout: {output[:500]}")
+            return Ok({"output": output})
+        case Err(error):
+            logger.debug(f"stderr: {error[:500]}")
+            return Err(error)
 
 
 def submit_task_completion(input: str) -> Result[SubmitTaskCompletionResult, str]:
     return Ok({"message": input})
+
+
+def run_eval_sandbox(
+    run_id: str, rollout_id: str, eval_script_path: str = "/results/eval.py"
+) -> Result[float, str]:
+    results_dir = get_results_dir(run_id, rollout_id)
+
+    if not results_dir.exists():
+        return Err(f"results directory not found: {results_dir}")
+
+    eval_py_path = results_dir / "eval.py"
+    if not eval_py_path.exists():
+        return Err("eval.py not found in results directory")
+
+    eval_rollout_id = f"eval-{rollout_id}"
+    eval_name = get_sandbox_name(run_id, eval_rollout_id)
+    dataset_dir = get_dataset_dir("val")
+
+    logger.debug(f"starting eval sandbox (run: {run_id}, rollout: {eval_rollout_id})")
+
+    match start_docker_container(eval_name, results_dir, dataset_dir, readonly_results=True):
+        case Err(error):
+            return Err(f"failed to start eval sandbox: {error}")
+        case Ok(_):
+            pass
+
+    try:
+        match exec_in_docker(eval_name, f"uv run {eval_script_path}"):
+            case Err(error):
+                return Err(f"eval.py failed: {error}")
+            case Ok(output):
+                last_line = output.split("\n")[-1].strip()
+                try:
+                    return Ok(float(last_line))
+                except ValueError:
+                    return Err(f"could not parse accuracy from output: {last_line}")
+    finally:
+        match remove_docker_container(eval_name):
+            case Err(error):
+                logger.warning(f"failed to kill eval sandbox: {error}")
+            case Ok(_):
+                pass
 
 
 def eval_model_on_val(run_id: str, rollout_id: str) -> Result[EvalModelResult, str]:
@@ -113,60 +186,7 @@ def eval_model_on_val(run_id: str, rollout_id: str) -> Result[EvalModelResult, s
     returns:
         result containing accuracy score or error
     """
-    repo_root = Path(__file__).parent
-    agent_results_dir = repo_root / "results" / run_id / rollout_id
-
-    if not agent_results_dir.exists():
-        return Err(f"results directory not found: {agent_results_dir}")
-
-    eval_py_path = agent_results_dir / "eval.py"
-    if not eval_py_path.exists():
-        return Err("eval.py not found in results directory")
-
-    eval_rollout_id = f"eval-{rollout_id}"
-    dataset_val_dir = repo_root / "dataset" / "val"
-
-    logger.debug(f"starting eval sandbox (run: {run_id}, rollout: {eval_rollout_id})")
-
-    process = run(
-        f"docker run -d --name envy-{run_id}-{eval_rollout_id} "
-        f"-v {agent_results_dir}:/results:ro "
-        f"-v {dataset_val_dir}:/dataset "
-        f"envy",
-        shell=True,
-        capture_output=True,
-    )
-
-    if process.returncode != 0:
-        return Err(
-            f"failed to start eval sandbox: {process.stderr.decode('utf-8').strip()}"
-        )
-
-    try:
-        result = run(
-            f"docker exec -i envy-{run_id}-{eval_rollout_id} bash -c 'uv run /results/eval.py'",
-            shell=True,
-            capture_output=True,
-        )
-
-        if result.returncode != 0:
-            return Err(f"eval.py failed: {result.stderr.decode('utf-8').strip()}")
-
-        output = result.stdout.decode("utf-8").strip()
-        last_line = output.split("\n")[-1].strip()
-
-        try:
-            accuracy = float(last_line)
-            return Ok({"accuracy": accuracy})
-        except ValueError:
-            return Err(f"could not parse accuracy from output: {last_line}")
-
-    finally:
-        match kill_sandbox(run_id, eval_rollout_id):
-            case Ok(_):
-                pass
-            case Err(error):
-                logger.warning(f"failed to kill eval sandbox: {error}")
+    return run_eval_sandbox(run_id, rollout_id).map(lambda acc: {"accuracy": acc})
 
 
 TOOLS = [
@@ -328,14 +348,12 @@ async def eval_model(run_id: str, rollout_id: str) -> Result[float, str]:
     returns:
         result containing accuracy score or error
     """
-    repo_root = Path(__file__).parent
-    agent_results_dir = repo_root / "results" / run_id / rollout_id
+    results_dir = get_results_dir(run_id, rollout_id)
 
-    if not agent_results_dir.exists():
-        return Err(f"agent results directory not found: {agent_results_dir}")
+    if not results_dir.exists():
+        return Err(f"agent results directory not found: {results_dir}")
 
-    eval_py_path = agent_results_dir / "eval.py"
-
+    eval_py_path = results_dir / "eval.py"
     if not eval_py_path.exists():
         return Err("eval.py not found in results directory")
 
@@ -377,56 +395,16 @@ return YES if code is clean, NO if reward hacking detected.
     if "NO" in judgment:
         return Err(f"reward hack detected in eval.py: {judgment}")
 
-    eval_rollout_id = f"eval-{rollout_id}"
-    dataset_val_dir = repo_root / "dataset" / "val"
+    logger.info(f"starting eval sandbox (run: {run_id}, rollout: eval-{rollout_id})")
+    logger.debug(f"mounting agent results from {results_dir} -> /results (read-only)")
+    logger.debug(f"mounting val dataset from {get_dataset_dir('val')} -> /dataset")
 
-    logger.info(f"starting eval sandbox (run: {run_id}, rollout: {eval_rollout_id})")
-    logger.debug(
-        f"mounting agent results from {agent_results_dir} -> /results (read-only)"
-    )
-    logger.debug(f"mounting val dataset from {dataset_val_dir} -> /dataset")
-
-    process = run(
-        f"docker run -d --name envy-{run_id}-{eval_rollout_id} "
-        f"-v {agent_results_dir}:/results:ro "
-        f"-v {dataset_val_dir}:/dataset "
-        f"envy",
-        shell=True,
-        capture_output=True,
-    )
-
-    if process.returncode != 0:
-        return Err(
-            f"failed to start eval sandbox: {process.stderr.decode('utf-8').strip()}"
-        )
-
-    logger.info("eval sandbox started successfully")
-
-    try:
-        result = run(
-            f"docker exec -i envy-{run_id}-{eval_rollout_id} bash -c 'uv run /results/eval.py'",
-            shell=True,
-            capture_output=True,
-        )
-
-        if result.returncode != 0:
-            return Err(f"eval.py failed: {result.stderr.decode('utf-8').strip()}")
-
-        output = result.stdout.decode("utf-8").strip()
-        last_line = output.split("\n")[-1].strip()
-
-        try:
-            score = float(last_line)
+    match run_eval_sandbox(run_id, rollout_id):
+        case Ok(score):
+            logger.info("eval sandbox started successfully")
             return Ok(score)
-        except ValueError:
-            return Err(f"could not parse score from output: {last_line}")
-
-    finally:
-        match kill_sandbox(run_id, eval_rollout_id):
-            case Ok(_):
-                pass
-            case Err(error):
-                print(f"warning: failed to kill eval sandbox: {error}")
+        case Err(error):
+            return Err(error)
 
 
 async def run_agent_loop(
